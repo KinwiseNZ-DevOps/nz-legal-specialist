@@ -1,0 +1,12 @@
+{
+  "name": "nz-legal-specialist-marketplace",
+  "owner": { "name": "Kinwise NZ" },
+  "description": "New Zealand contract, trading terms and privacy wording skills, cited to the Act and section.",
+  "plugins": [
+    {
+      "name": "nz-legal-specialist",
+      "source": "./",
+      "description": "Drafts and reviews New Zealand business contract, terms of trade and privacy policy wording, with a specific Act and section cited for every flagged issue."
+    }
+  ]
+}

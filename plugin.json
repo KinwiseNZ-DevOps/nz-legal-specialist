@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "nz-legal-specialist",
+  "version": "0.1.0",
+  "description": "Drafts and reviews New Zealand business contract, terms of trade and privacy policy wording, with a specific Act and section cited for every flagged issue.",
+  "author": {
+    "name": "Kinwise NZ"
+  },
+  "repository": "https://github.com/KinwiseNZ-DevOps/nz-legal-specialist",
+  "license": "MIT",
+  "keywords": [
+    "agent-skills"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "NZ Legal Specialist",
+        "shortDescription": "NZ contract, trading terms and privacy wording, cited to the Act and section.",
+        "longDescription": "Drafts and reviews New Zealand business contract, terms of trade and privacy policy wording clause by clause, citing a specific Act and section for every flagged issue and never contracting out of a non-excludable statutory right.",
+        "developerName": "Kinwise NZ",
+        "category": "Productivity"
+      }
+    }
+  }
+}

@@ -1,0 +1,961 @@
+#!/usr/bin/env python3
+"""Validate skills and keep the README catalogue in sync. Stdlib only.
+
+  python scripts/skills_tool.py validate     # exit 1 on any problem
+  python scripts/skills_tool.py catalogue    # rewrite README catalogue block
+  python scripts/skills_tool.py check        # validate + fail if catalogue is stale
+
+Quality rules from the Agent Skills spec (allowed frontmatter, third-person descriptions, reserved words, installed agent copies matching resources/agents) run on every check, with warnings for softer issues. Plugin manifests in .claude-plugin/, agent profile contents and the manifest agents list are checked on every run. Dashes are always checked in text files outside reference-content/, which holds raw source material. Ship checks for placeholders and setup-only paths in the Git index run once skills/example-skill has been deleted.
+"""
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKILLS = ROOT / "skills"
+README = ROOT / "README.md"
+AGENTS = ROOT / "AGENTS.md"
+EVALS = ROOT / "evals" / "cases.jsonl"
+TRIGGERS = ROOT / "evals" / "triggers.jsonl"
+TRIGGER_TYPES = ("obvious", "paraphrase", "unrelated")
+AGENT_SOURCES = ROOT / "resources" / "agents"
+BEGIN, END = "<!-- catalogue:begin -->", "<!-- catalogue:end -->"
+BADGE_RE = re.compile(r"(badge/agent_skills-)(\d+|<N>)(-)")
+NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+LINK_RE = re.compile(r"\]\((?!https?://|#|mailto:)([^)\s]+)\)")
+ABSOLUTE_RE = re.compile(r"^([A-Za-z]:)?/")
+MAX_BODY_LINES, MAX_DESC, MAX_NAME, MIN_EVALS = 500, 1024, 64, 3
+BANNED_DASHES = (chr(0x2013), chr(0x2014))
+PLACEHOLDER_RE = re.compile(r"<([A-Za-z][^<>\n]*)>")
+HTML_TAGS = {"details", "summary", "div", "br", "p", "a", "img", "kbd", "sub", "sup"}
+PLACEHOLDER_FILES = (
+    "README.md",
+    "LICENSE",
+    "AGENTS.md",
+    "evals/cases.jsonl",
+    "evals/triggers.jsonl",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "plugin.json",
+    ".agents/plugins/marketplace.json",
+)
+TEXT_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".py",
+    ".json",
+    ".jsonl",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".cfg",
+    ".ini",
+    ".sh",
+    ".ps1",
+    ".mjs",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".license",
+}
+PRIVATE_PATHS = ("SETUP.md", "templates", "reference-content")
+PLUGIN_DIR = ROOT / ".claude-plugin"
+RESERVED_PLUGIN_PREFIXES = ("claude-", "anthropic-", "anthropics-", "cc-plugin-")
+RESERVED_PLUGIN_NAMES = {
+    "claude",
+    "anthropic",
+    "anthropics",
+    "claude-code",
+    "claude-mods",
+}
+MARKETPLACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+IGNORED_AGENT_FIELDS = ("permissionMode", "hooks", "mcpServers", "initialPrompt")
+SKILL_PATH_RE = re.compile(r"skills/[A-Za-z0-9_.-]+/SKILL\.md")
+
+
+def read_text(path):
+    for encoding in ("utf-8-sig", "utf-8"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def parse(path):
+    text = read_text(path)
+    if text is None:
+        return None, ""
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+    if not m:
+        return None, text
+    fm, key, folded = {}, None, False
+    for line in m.group(1).splitlines():
+        top = re.match(r"^([A-Za-z_-]+):\s*(.*)$", line)
+        if top and not line.startswith(" "):
+            key, val = top.group(1), top.group(2).strip()
+            folded = val in (">", "|")
+            fm[key] = "" if folded else val.strip("\"'")
+        elif key and line.startswith(" "):
+            fm[key] = (fm[key] + " " + line.strip()).strip()
+    return fm, m.group(2)
+
+
+def skill_dirs():
+    if not SKILLS.is_dir():
+        sys.exit("ERROR: skills/ directory not found")
+    return sorted(p for p in SKILLS.iterdir() if p.is_dir())
+
+
+def link_errors(md):
+    text = read_text(md)
+    if text is None:
+        return []
+    errors = []
+    for target in LINK_RE.findall(text):
+        rel = target.split("#")[0]
+        if not rel or ABSOLUTE_RE.match(rel):
+            continue
+        if not (md.parent / rel).resolve().exists():
+            errors.append(f"{md.relative_to(ROOT)}: broken link {target}")
+    return errors
+
+
+def validate():
+    errors = []
+    names = {p.name for p in skill_dirs()}
+    for d in skill_dirs():
+        f = d / "SKILL.md"
+        if not f.exists():
+            errors.append(f"{d.name}: missing SKILL.md")
+            continue
+        fm, body = parse(f)
+        if fm is None:
+            errors.append(f"{d.name}: no frontmatter")
+            continue
+        name, desc = fm.get("name", ""), fm.get("description", "")
+        if name != d.name:
+            errors.append(f"{d.name}: name '{name}' != folder")
+        if not NAME_RE.match(name) or len(name) > MAX_NAME:
+            errors.append(f"{d.name}: invalid name")
+        if not desc or len(desc) > MAX_DESC:
+            errors.append(
+                f"{d.name}: description empty or >{MAX_DESC} chars ({len(desc)})"
+            )
+        if "<" in desc or ">" in desc:
+            errors.append(f"{d.name}: description contains angle brackets")
+        if not re.search(r"\bUse\b|\bUse when\b", desc):
+            errors.append(f"{d.name}: description lacks a 'Use ...' trigger")
+        lines = len(body.splitlines())
+        if lines > MAX_BODY_LINES:
+            errors.append(f"{d.name}: body {lines} lines > {MAX_BODY_LINES}")
+        for md in sorted(d.rglob("*.md")):
+            errors += link_errors(md)
+    for md in (README, AGENTS):
+        if md.exists():
+            errors += link_errors(md)
+    if EVALS.exists():
+        counts = {n: 0 for n in names}
+        for i, line in enumerate(EVALS.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                case = json.loads(line)
+            except json.JSONDecodeError:
+                errors.append(f"evals/cases.jsonl:{i}: invalid JSON")
+                continue
+            for s in case.get("skills", []):
+                if s in counts:
+                    counts[s] += 1
+                else:
+                    errors.append(f"evals/cases.jsonl:{i}: unknown skill {s}")
+            if not case.get("query") or not case.get("expected_behavior"):
+                errors.append(
+                    f"evals/cases.jsonl:{i}: needs query and expected_behavior"
+                )
+        for n, c in counts.items():
+            if c < MIN_EVALS:
+                errors.append(f"{n}: {c} eval cases < {MIN_EVALS}")
+    else:
+        errors.append("evals/cases.jsonl missing")
+    errors += validate_triggers(names)
+    errors += validate_user_only_policy()
+    for d in skill_dirs():
+        if (d / "README.md").exists():
+            errors.append(
+                f"{d.name}: README.md inside a skill folder; put the content in SKILL.md or references/"
+            )
+    return errors
+
+
+def user_only_skills():
+    """Skills a person starts by name (disable-model-invocation: true). They take no triggering tests."""
+    out = set()
+    for d in skill_dirs():
+        fm, _ = parse(d / "SKILL.md")
+        if fm and fm.get("disable-model-invocation", "").lower() == "true":
+            out.add(d.name)
+    return out
+
+
+def validate_user_only_policy():
+    """Codex needs its own switch: agents/openai.yaml with allow_implicit_invocation: false."""
+    errors = []
+    for d in skill_dirs():
+        if d.name not in user_only_skills():
+            continue
+        policy = d / "agents" / "openai.yaml"
+        text = read_text(policy) if policy.exists() else ""
+        if not re.search(r"(?m)^\s*allow_implicit_invocation:\s*false\s*$", text or ""):
+            errors.append(
+                f"{d.name}: user-only skill needs skills/{d.name}/agents/openai.yaml with policy.allow_implicit_invocation: false (Codex)"
+            )
+    return errors
+
+
+def validate_triggers(names):
+    """Triggering tests: each skill needs obvious, paraphrase and unrelated queries."""
+    if not TRIGGERS.exists():
+        return ["evals/triggers.jsonl missing"]
+    errors = []
+    user_only = user_only_skills()
+    seen = {n: set() for n in names if n not in user_only}
+    for i, line in enumerate(TRIGGERS.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            case = json.loads(line)
+        except json.JSONDecodeError:
+            errors.append(f"evals/triggers.jsonl:{i}: invalid JSON")
+            continue
+        skill, kind = case.get("skill"), case.get("type")
+        if skill in user_only:
+            errors.append(
+                f"evals/triggers.jsonl:{i}: {skill} is user-only (disable-model-invocation); remove its trigger queries"
+            )
+            continue
+        if skill not in seen:
+            errors.append(f"evals/triggers.jsonl:{i}: unknown skill {skill}")
+        elif kind not in TRIGGER_TYPES:
+            errors.append(
+                f"evals/triggers.jsonl:{i}: type must be one of {', '.join(TRIGGER_TYPES)}"
+            )
+        elif not case.get("query"):
+            errors.append(f"evals/triggers.jsonl:{i}: needs a query")
+        else:
+            seen[skill].add(kind)
+    for n, kinds in seen.items():
+        for kind in TRIGGER_TYPES:
+            if kind not in kinds:
+                errors.append(f"{n}: no '{kind}' trigger query in evals/triggers.jsonl")
+    return errors
+
+
+def profile_stem(path):
+    return (
+        path.name[: -len(".agent.md")] if path.name.endswith(".agent.md") else path.stem
+    )
+
+
+def valid_profile_name(stem, scope, skill_names):
+    if scope == "shared":
+        return stem.startswith("shared-")
+    return any(stem.startswith(f"{name}-") for name in skill_names)
+
+
+def validate_agent_sources():
+    errors = []
+    if not AGENT_SOURCES.is_dir():
+        return errors
+    names = sorted(p.name for p in skill_dirs())
+    for host in sorted(path for path in AGENT_SOURCES.iterdir() if path.is_dir()):
+        profiles = []
+        workflow_profiles = []
+        for scope in ("shared", "skill-specific"):
+            folder = host / scope
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.glob("*.md")):
+                profiles.append(path)
+                stem = profile_stem(path)
+                if scope == "skill-specific" and stem.endswith("-workflow"):
+                    workflow_profiles.append(path)
+                if not valid_profile_name(stem, scope, names):
+                    expected = (
+                        "shared-<role>"
+                        if scope == "shared"
+                        else "<owning-skill-name>-<role>"
+                    )
+                    errors.append(f"{path.relative_to(ROOT)}: name must use {expected}")
+        if len(profiles) > 2:
+            errors.append(
+                f"{host.name}: {len(profiles)} agent profiles > 2; combine workflows into one main agent and one helper"
+            )
+        if profiles and len(workflow_profiles) != 1:
+            errors.append(
+                f"{host.name}: supply exactly one skill-specific main profile ending in -workflow"
+            )
+    return errors
+
+
+def agent_frontmatter(path):
+    m = re.match(r"^---\n(.*?)\n---\n", read_text(path) or "", re.S)
+    return m.group(1) if m else None
+
+
+def agent_skills(frontmatter):
+    skills, listing = [], False
+    for line in frontmatter.splitlines():
+        if re.match(r"^skills:\s*$", line):
+            listing = True
+            continue
+        inline = re.match(r"^skills:\s*(.+)$", line)
+        if inline:
+            return [
+                s.strip() for s in inline.group(1).strip("[]").split(",") if s.strip()
+            ]
+        if listing:
+            item = re.match(r"^\s+-\s+(\S+)\s*$", line)
+            if item:
+                skills.append(item.group(1))
+            elif line and not line.startswith(" "):
+                break
+    return skills
+
+
+def agent_profiles(host):
+    for scope in ("shared", "skill-specific"):
+        folder = AGENT_SOURCES / host / scope
+        if folder.is_dir():
+            yield from sorted(folder.glob("*.md"))
+
+
+def validate_agent_contents():
+    errors = []
+    if not AGENT_SOURCES.is_dir():
+        return errors
+    names = {p.name for p in skill_dirs()}
+    for host in sorted(p.name for p in AGENT_SOURCES.iterdir() if p.is_dir()):
+        for path in agent_profiles(host):
+            rel = path.relative_to(ROOT)
+            text = read_text(path) or ""
+            if SKILL_PATH_RE.search(text):
+                errors.append(
+                    f"{rel}: refers to skills/<name>/SKILL.md, a path that does not exist in a user's project or an installed plugin. Name the skill and list it under skills: instead"
+                )
+            if host != "claude-code":
+                continue
+            fm = agent_frontmatter(path)
+            if fm is None:
+                errors.append(f"{rel}: Claude Code agent has no frontmatter")
+                continue
+            for field in IGNORED_AGENT_FIELDS:
+                if re.search(rf"^{field}:", fm, re.M):
+                    errors.append(
+                        f"{rel}: '{field}' is ignored in plugin agents; use plugin hooks or MCP config instead"
+                    )
+            for skill in agent_skills(fm):
+                if skill not in names:
+                    errors.append(
+                        f"{rel}: skills: lists '{skill}', which is not in skills/"
+                    )
+    return errors
+
+
+def load_json(path):
+    try:
+        return json.loads(read_text(path) or ""), None
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"{path.relative_to(ROOT)}: invalid JSON ({exc})"
+
+
+def validate_plugin():
+    errors = []
+    manifest = PLUGIN_DIR / "plugin.json"
+    market = PLUGIN_DIR / "marketplace.json"
+    if not manifest.exists():
+        return [".claude-plugin/plugin.json missing"]
+    data, err = load_json(manifest)
+    if err:
+        return [err]
+    name = data.get("name", "")
+    if not isinstance(name, str) or not name:
+        errors.append(".claude-plugin/plugin.json: name is required")
+        name = ""
+    elif "<" not in name:
+        if not NAME_RE.match(name):
+            errors.append(
+                f".claude-plugin/plugin.json: name '{name}' must be kebab-case"
+            )
+        if name in RESERVED_PLUGIN_NAMES or name.startswith(RESERVED_PLUGIN_PREFIXES):
+            errors.append(
+                f".claude-plugin/plugin.json: name '{name}' is reserved for Anthropic plugins"
+            )
+    for key in ("version", "description"):
+        if not data.get(key):
+            errors.append(f".claude-plugin/plugin.json: {key} is required")
+    if not (data.get("author") or {}).get("name"):
+        errors.append(".claude-plugin/plugin.json: author.name is required")
+
+    first = (read_text(ROOT / "LICENSE") or "").lstrip().splitlines()[:1]
+    is_mit = bool(first) and first[0].strip() == "MIT License"
+    badge_mit = "license-MIT" in (read_text(README) or "")
+    declared = data.get("license", "")
+    if not declared:
+        errors.append(".claude-plugin/plugin.json: license is required")
+    elif (declared == "MIT") != is_mit:
+        errors.append(
+            f".claude-plugin/plugin.json: license '{declared}' does not match LICENSE ({'MIT' if is_mit else 'not MIT'})"
+        )
+    if badge_mit and declared != "MIT":
+        errors.append("README.md: MIT licence badge but plugin.json license is not MIT")
+
+    listed = []
+    if "agents" in data:
+        entries = data["agents"]
+        if not isinstance(entries, list) or not all(
+            isinstance(e, str) for e in entries
+        ):
+            errors.append(
+                ".claude-plugin/plugin.json: agents must be a list of file paths"
+            )
+            entries = []
+        for entry in entries:
+            target = (ROOT / entry).resolve()
+            if not entry.startswith("./") or not entry.endswith(".md") or ".." in entry:
+                errors.append(
+                    f".claude-plugin/plugin.json: agents entry '{entry}' must be a ./ path to a .md file inside the repo"
+                )
+            elif not target.is_file():
+                errors.append(
+                    f".claude-plugin/plugin.json: agents entry '{entry}' does not exist"
+                )
+            else:
+                listed.append(target)
+    for path in agent_profiles("claude-code"):
+        if path.resolve() not in listed:
+            errors.append(
+                f".claude-plugin/plugin.json: agents must list ./{path.relative_to(ROOT).as_posix()}; without it Claude Code scans agents/ instead"
+            )
+
+    top_agents = ROOT / "agents"
+    if top_agents.is_dir():
+        for md in sorted(top_agents.rglob("*.md")):
+            errors.append(
+                f"{md.relative_to(ROOT).as_posix()}: Claude Code scans a top-level agents/ folder; keep Codex briefs only under resources/agents/codex/"
+            )
+
+    if not market.exists():
+        return errors + [".claude-plugin/marketplace.json missing"]
+    mdata, err = load_json(market)
+    if err:
+        return errors + [err]
+    mname = mdata.get("name", "")
+    if not mname or ("<" not in mname and not MARKETPLACE_NAME_RE.match(mname)):
+        errors.append(".claude-plugin/marketplace.json: name missing or invalid")
+    if not (mdata.get("owner") or {}).get("name"):
+        errors.append(".claude-plugin/marketplace.json: owner.name is required")
+    entries = mdata.get("plugins")
+    if not isinstance(entries, list) or len(entries) != 1:
+        errors.append(
+            ".claude-plugin/marketplace.json: plugins must hold exactly one entry (this repo)"
+        )
+    else:
+        entry = entries[0]
+        if entry.get("name") != name:
+            errors.append(
+                ".claude-plugin/marketplace.json: plugin entry name differs from plugin.json name"
+            )
+        if entry.get("source") != "./":
+            errors.append(
+                '.claude-plugin/marketplace.json: plugin entry source must be "./"'
+            )
+        if entry.get("version") and entry.get("version") != data.get("version"):
+            errors.append(
+                ".claude-plugin/marketplace.json: entry version differs from plugin.json version"
+            )
+    return errors
+
+
+ALLOWED_FRONTMATTER = {
+    "name",
+    "description",
+    "license",
+    "compatibility",
+    "metadata",
+    "allowed-tools",
+    "disable-model-invocation",
+    "user-invocable",
+    "argument-hint",
+    "model",
+    "effort",
+    "context",
+    "agent",
+    "hooks",
+    "paths",
+    "shell",
+    "when_to_use",
+    "arguments",
+}
+RESERVED_SKILL_WORDS = ("anthropic", "claude")
+FIRST_PERSON_RE = re.compile(r"^\s*(I|I'm|I can|You|You can|We|My|Your)\b")
+USE_TRIGGER_RE = re.compile(r"\bUse (when|for|this|it)\b")
+MAX_COMPATIBILITY = 500
+LONG_REFERENCE_LINES = 100
+CONTENTS_RE = re.compile(r"(?i)\b(contents|table of contents)\b")
+BACKSLASH_LINK_RE = re.compile(r"\]\([^)\s]*\\[^)\s]*\)")
+INSTALLED_AGENT_DIRS = {
+    "claude-code": ".claude/agents",
+    "github-copilot": ".github/agents",
+}
+
+
+def validate_quality():
+    """Soft and hard checks drawn from the Agent Skills spec and Anthropic's authoring guidance.
+
+    Returns (errors, warnings). Warnings never fail the run; they flag things worth a human look."""
+    errors, warnings = [], []
+    dirs = skill_dirs()
+    for d in dirs:
+        f = d / "SKILL.md"
+        if not f.exists():
+            continue
+        fm, body = parse(f)
+        if fm is None:
+            continue
+        for key in fm:
+            if key not in ALLOWED_FRONTMATTER:
+                errors.append(
+                    f"{d.name}: frontmatter key '{key}' is not in the Agent Skills spec or the Claude Code extras"
+                )
+        name, desc = fm.get("name", ""), fm.get("description", "")
+        if any(word in name for word in RESERVED_SKILL_WORDS):
+            errors.append(
+                f"{d.name}: skill names must not contain the reserved words {RESERVED_SKILL_WORDS}"
+            )
+        if desc and FIRST_PERSON_RE.match(desc):
+            errors.append(
+                f"{d.name}: description must be third person, not 'I' or 'You'"
+            )
+        if desc and not USE_TRIGGER_RE.search(desc):
+            errors.append(
+                f"{d.name}: description needs a 'Use when ...' or 'Use for ...' trigger"
+            )
+        if (
+            len(dirs) > 1
+            and desc
+            and not re.search(
+                r"\b[Dd]o not\b|\b[Nn]ot for\b|\b[Dd]on't\b|\b[Nn]ever\b", desc
+            )
+        ):
+            warnings.append(
+                f"{d.name}: description has no negative trigger ('Do not use for ...'); siblings can steal its requests"
+            )
+        if len(fm.get("compatibility", "")) > MAX_COMPATIBILITY:
+            errors.append(
+                f"{d.name}: compatibility is over {MAX_COMPATIBILITY} characters"
+            )
+        reference_dir = d / "references"
+        for md in sorted(d.rglob("*.md")):
+            text = read_text(md) or ""
+            if BACKSLASH_LINK_RE.search(text):
+                errors.append(
+                    f"{md.relative_to(ROOT).as_posix()}: link uses a backslash path; use forward slashes"
+                )
+            if md.parent == reference_dir:
+                lines = text.splitlines()
+                if len(lines) > LONG_REFERENCE_LINES and not any(
+                    CONTENTS_RE.search(line) for line in lines[:12]
+                ):
+                    warnings.append(
+                        f"{md.relative_to(ROOT).as_posix()}: {len(lines)} lines with no contents line near the top"
+                    )
+                for target in LINK_RE.findall(text):
+                    rel = target.split("#")[0]
+                    if (
+                        rel.endswith(".md")
+                        and (md.parent / rel).resolve().parent
+                        == reference_dir.resolve()
+                    ):
+                        warnings.append(
+                            f"{md.relative_to(ROOT).as_posix()}: links to another reference file ({rel}); keep references one level deep"
+                        )
+    changelog = ROOT / "CHANGELOG.md"
+    manifest = PLUGIN_DIR / "plugin.json"
+    if changelog.exists() and manifest.exists():
+        version = (load_json(manifest)[0] or {}).get("version", "")
+        if (
+            version
+            and "<" not in version
+            and f"[{version}]" not in (read_text(changelog) or "")
+        ):
+            warnings.append(
+                f"CHANGELOG.md has no [{version}] section; run scripts/bump_version.py when releasing"
+            )
+    if (ROOT / "quality" / "evals").exists() and (
+        ROOT / "scripts" / "export_evals.py"
+    ).exists():
+        stale = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "export_evals.py"), "--check"],
+            capture_output=True,
+            text=True,
+        )
+        if stale.returncode:
+            warnings.append(
+                "quality/evals is out of date with evals/cases.jsonl; run scripts/export_evals.py"
+            )
+    for host, installed in INSTALLED_AGENT_DIRS.items():
+        folder = ROOT / installed
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.md")):
+            sources = [p for p in agent_profiles(host) if p.name == path.name]
+            if not sources:
+                continue
+            a = (read_text(path) or "").replace("\r\n", "\n")
+            b = (read_text(sources[0]) or "").replace("\r\n", "\n")
+            if a != b:
+                errors.append(
+                    f"{path.relative_to(ROOT).as_posix()}: differs from {sources[0].relative_to(ROOT).as_posix()}; the source in resources/agents is canonical, copy it over"
+                )
+    return errors, warnings
+
+
+def dashes():
+    errors = []
+    for p in sorted(ROOT.rglob("*")):
+        parts = p.relative_to(ROOT).parts
+        if (
+            not p.is_file()
+            or ".git" in parts
+            or parts[0] == "reference-content"
+            or parts[:3] == ("quality", "evals", "results")
+        ):
+            continue
+        if any(dash in p.name for dash in BANNED_DASHES):
+            errors.append(
+                f"{p.relative_to(ROOT)}: em or en dash in the file name (use a hyphen)"
+            )
+        text = read_text(p)
+        if text is None:
+            if p.suffix.lower() in TEXT_EXTENSIONS or p.suffix == "":
+                errors.append(
+                    f"{p.relative_to(ROOT)}: not UTF-8 text, so dashes cannot be checked"
+                )
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if any(dash in line for dash in BANNED_DASHES):
+                errors.append(
+                    f"{p.relative_to(ROOT)}:{i}: em or en dash (use a hyphen)"
+                )
+    return errors
+
+
+def strip_terms():
+    f = ROOT / "reference-content" / "strip-terms.txt"
+    if not f.exists():
+        return []
+    terms = [
+        line.strip().lower()
+        for line in f.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not terms:
+        return []
+    targets = [ROOT / n for n in ("README.md", "AGENTS.md")]
+    for folder in ("skills", "evals", "reference-content/sources"):
+        d = ROOT / folder
+        if d.is_dir():
+            targets += [x for x in d.rglob("*") if x.is_file()]
+    errors = []
+    for x in targets:
+        text = read_text(x)
+        if text is None:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            low = line.lower()
+            for term in terms:
+                if term in low:
+                    errors.append(
+                        f"{x.relative_to(ROOT)}:{i}: project-specific term '{term}' (see strip-terms.txt)"
+                    )
+    return errors
+
+
+def ship_checks():
+    if (SKILLS / "example-skill").exists():
+        return [], True
+    errors = []
+    for rel in PLACEHOLDER_FILES:
+        f = ROOT / rel
+        if not f.exists():
+            continue
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            for m in PLACEHOLDER_RE.finditer(line):
+                inner = m.group(1)
+                first = inner.split()[0].lower().rstrip("/")
+                if first in HTML_TAGS:
+                    continue
+                if " " in inner or inner[0].isupper():
+                    errors.append(f"{rel}:{i}: leftover placeholder <{inner}>")
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--cached", "--", *PRIVATE_PATHS],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return errors + ["git is not installed, so ship checks could not run"], False
+    if tracked.returncode:
+        errors.append(
+            "could not read the Git index; commit the repository before shipping"
+        )
+    else:
+        errors.extend(
+            f"{path}: private setup file is tracked; keep it local and ignored"
+            for path in tracked.stdout.splitlines()
+        )
+    # Checked one path at a time: `git check-ignore --quiet` rejects several paths at once.
+    # Only paths that exist are tested, because a directory-only ignore rule cannot match a
+    # path that is not there, and a repo with no reference-content/ has nothing to leak yet.
+    unignored = []
+    for rel in PRIVATE_PATHS:
+        if not (ROOT / rel).exists():
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--no-index", "--", rel],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            return errors + [
+                "git is not installed, so ship checks could not run"
+            ], False
+        if result.returncode != 0:
+            unignored.append(rel)
+    if unignored:
+        errors.append(
+            "setup-only paths must be ignored in .gitignore: " + ", ".join(unignored)
+        )
+    return errors, False
+
+
+def build_catalogue():
+    rows = ["| Skill | Purpose |", "|---|---|"]
+    for d in skill_dirs():
+        fm, _ = parse(d / "SKILL.md")
+        desc = (fm or {}).get("description", "")
+        sentences = re.split(r"(?<=\.)\s", desc) if desc else [""]
+        first = next((x for x in sentences if not x.startswith("Use ")), sentences[0])
+        rows.append(f"| [`{d.name}`](skills/{d.name}/SKILL.md) | {first} |")
+    return "\n".join(rows)
+
+
+def catalogue(write):
+    text = README.read_text(encoding="utf-8")
+    pat = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)
+    new = f"{BEGIN}\n{build_catalogue()}\n{END}"
+    if not pat.search(text):
+        return ["README.md: catalogue markers missing"]
+    updated = pat.sub(lambda _: new, text)
+    updated = BADGE_RE.sub(
+        lambda m: f"{m.group(1)}{len(skill_dirs())}{m.group(3)}", updated
+    )
+    if updated == text:
+        return []
+    if write:
+        README.write_text(updated, encoding="utf-8")
+        return []
+    return ["README.md: catalogue stale; run `python scripts/skills_tool.py catalogue`"]
+
+
+def validate_portable_plugin():
+    errors = []
+    manifest = ROOT / "plugin.json"
+    market = ROOT / ".agents" / "plugins" / "marketplace.json"
+    if not manifest.exists():
+        return ["plugin.json missing"]
+    data, err = load_json(manifest)
+    if err:
+        return [err]
+    claude, claude_err = load_json(PLUGIN_DIR / "plugin.json")
+    if claude_err:
+        return [claude_err]
+    for key in ("name", "version", "license"):
+        if data.get(key) != claude.get(key):
+            errors.append(f"plugin.json: {key} differs from .claude-plugin/plugin.json")
+    if not data.get("description"):
+        errors.append("plugin.json: description is required")
+    if (data.get("author") or {}).get("name") != (claude.get("author") or {}).get(
+        "name"
+    ):
+        errors.append(
+            "plugin.json: author.name differs from .claude-plugin/plugin.json"
+        )
+    if not market.exists():
+        return errors + [".agents/plugins/marketplace.json missing"]
+    mdata, err = load_json(market)
+    if err:
+        return errors + [err]
+    if not mdata.get("name"):
+        errors.append(".agents/plugins/marketplace.json: name is required")
+    entries = mdata.get("plugins")
+    if not isinstance(entries, list) or len(entries) != 1:
+        errors.append(
+            ".agents/plugins/marketplace.json: plugins must hold exactly one entry (this repo)"
+        )
+    else:
+        entry = entries[0]
+        if entry.get("name") != data.get("name"):
+            errors.append(
+                ".agents/plugins/marketplace.json: plugin entry name differs from plugin.json name"
+            )
+        source = entry.get("source") or {}
+        if source.get("source") != "local" or source.get("path") != "./":
+            errors.append(
+                '.agents/plugins/marketplace.json: plugin source must be local and use "./"'
+            )
+        policy = entry.get("policy") or {}
+        if policy.get("installation") not in {
+            "AVAILABLE",
+            "INSTALLED_BY_DEFAULT",
+            "NOT_AVAILABLE",
+        }:
+            errors.append(
+                ".agents/plugins/marketplace.json: plugin installation policy is invalid"
+            )
+        if policy.get("authentication") not in {"ON_INSTALL", "ON_FIRST_USE"}:
+            errors.append(
+                ".agents/plugins/marketplace.json: plugin authentication policy is invalid"
+            )
+        if not entry.get("category"):
+            errors.append(
+                ".agents/plugins/marketplace.json: plugin category is required"
+            )
+    return errors
+
+
+def validate_always_on():
+    hooks_dir = ROOT / "hooks"
+    config_path = hooks_dir / "always-on.config.json"
+    if not hooks_dir.exists() and not config_path.exists():
+        return []
+    errors = []
+    data, err = load_json(config_path)
+    if err:
+        return [err]
+    for key in ("id", "name", "phrase", "rules"):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            errors.append(f"hooks/always-on.config.json: {key} is required")
+    if errors:
+        return errors
+    rules = ROOT / data["rules"]
+    if not rules.is_file():
+        errors.append(
+            f"hooks/always-on.config.json: rules file '{data['rules']}' does not exist"
+        )
+    else:
+        text = rules.read_text(encoding="utf-8")
+        words = len(text.split())
+        if words > 320:
+            errors.append(
+                f"{data['rules']}: {words} words; keep always-on rules to 320 or fewer, they are paid for in every session"
+            )
+        if re.search(r"<[A-Za-z][^<>\n]*>", text):
+            errors.append(f"{data['rules']}: leftover placeholder text")
+    hooks_json, err = load_json(hooks_dir / "hooks.json")
+    if err:
+        errors.append(err)
+    else:
+        raw = json.dumps(hooks_json)
+        if "always-on.mjs" not in raw:
+            errors.append("hooks/hooks.json: must run hooks/always-on.mjs")
+        needed = ["always-on.mjs", "common.mjs"] + (
+            ["guard.mjs"] if "guard.mjs" in raw else []
+        )
+        for name in needed:
+            if not (hooks_dir / name).is_file():
+                errors.append(f"hooks/{name} is missing")
+    markers = data.get("autoMarkers", [])
+    if not isinstance(markers, list) or not all(
+        isinstance(m, dict) and m.get("file") for m in markers
+    ):
+        errors.append(
+            "hooks/always-on.config.json: autoMarkers must be a list of objects with a file"
+        )
+    if data.get("defaultMode", "on") not in ("on", "off", "auto"):
+        errors.append(
+            "hooks/always-on.config.json: defaultMode must be on, off or auto"
+        )
+    known = {
+        "promptGuard",
+        "editSecurity",
+        "linkGuard",
+        "styleGuard",
+        "sessionLog",
+        "verifyReminder",
+        "autoCommit",
+        "packageGuard",
+        "licenseGuard",
+        "dangerGuard",
+        "secretsGuard",
+    }
+    features = data.get("features", {})
+    if not isinstance(features, dict):
+        errors.append("hooks/always-on.config.json: features must be an object")
+    else:
+        for key, value in features.items():
+            if key not in known:
+                errors.append(f"hooks/always-on.config.json: unknown feature '{key}'")
+            elif not isinstance(value, bool):
+                errors.append(
+                    f"hooks/always-on.config.json: feature '{key}' must be true or false"
+                )
+    return errors
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
+    errors = []
+    warnings = []
+    skipped = False
+    if cmd in ("validate", "check"):
+        errors += validate()
+        errors += validate_agent_sources()
+        errors += validate_agent_contents()
+        errors += validate_plugin()
+        errors += validate_portable_plugin()
+        errors += validate_always_on()
+        quality_errors, warnings = validate_quality()
+        errors += quality_errors
+        errors += dashes()
+        errors += strip_terms()
+        ship_errors, skipped = ship_checks()
+        errors += ship_errors
+    if cmd == "catalogue":
+        errors += catalogue(write=True)
+    if cmd == "check":
+        errors += catalogue(write=False)
+    if cmd not in ("validate", "catalogue", "check"):
+        print(__doc__)
+        return 2
+    for w in warnings:
+        print("WARN:", w)
+    for e in errors:
+        print("ERROR:", e)
+    note = " [ship checks skipped: example-skill present]" if skipped else ""
+    print(f"{cmd}: {'FAILED' if errors else 'ok'} ({len(skill_dirs())} skills){note}")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

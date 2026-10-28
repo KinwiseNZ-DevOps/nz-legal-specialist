@@ -1,0 +1,10 @@
+{
+  "name": "nz-legal-specialist",
+  "version": "0.1.0",
+  "description": "Drafts and reviews New Zealand business contract, terms of trade and privacy policy wording, with a specific Act and section cited for every flagged issue.",
+  "author": { "name": "Kinwise NZ" },
+  "license": "MIT",
+  "repository": "https://github.com/KinwiseNZ-DevOps/nz-legal-specialist",
+  "keywords": ["agent-skills"],
+  "experimental": { "evals": "quality/evals" }
+}

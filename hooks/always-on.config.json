@@ -1,0 +1,10 @@
+{
+  "id": "nz-legal-specialist",
+  "name": "NZ Legal Specialist",
+  "phrase": "legal",
+  "rules": "skills/nz-legal-specialist/references/always-on-rules.md",
+  "defaultMode": "auto",
+  "autoDetect": false,
+  "autoMarkers": [],
+  "features": {}
+}

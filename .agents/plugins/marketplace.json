@@ -1,0 +1,20 @@
+{
+  "name": "nz-legal-specialist-marketplace",
+  "interface": {
+    "displayName": "NZ Legal Specialist"
+  },
+  "plugins": [
+    {
+      "name": "nz-legal-specialist",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

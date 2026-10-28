@@ -1,0 +1,12 @@
+{"skill": "nz-legal-specialist", "type": "obvious", "query": "Can you check this contract follows New Zealand law?"}
+{"skill": "nz-legal-specialist", "type": "paraphrase", "query": "I need someone to look over a business agreement before I sign it, making sure the wording holds up here in NZ."}
+{"skill": "nz-legal-specialist", "type": "unrelated", "query": "Can you explain how PAYE tax brackets work for a new employee?"}
+{"skill": "nz-contract-drafting", "type": "obvious", "query": "Draft a supply contract between my business and a wholesaler, under NZ law."}
+{"skill": "nz-contract-drafting", "type": "paraphrase", "query": "I'm putting together the terms two companies will sign to formalise a deal, and I want the clauses about who's bound and what happens if someone backs out to be solid."}
+{"skill": "nz-contract-drafting", "type": "unrelated", "query": "Write our refund policy for customers who bought a faulty blender."}
+{"skill": "nz-trading-terms", "type": "obvious", "query": "Review our terms of trade for Fair Trading Act compliance."}
+{"skill": "nz-trading-terms", "type": "paraphrase", "query": "Our sales page makes some bold claims about the product, and I want to make sure we're not going to get in trouble with the Commerce Commission."}
+{"skill": "nz-trading-terms", "type": "unrelated", "query": "Help me write the confidentiality clause in our employment agreement."}
+{"skill": "nz-privacy-compliance", "type": "obvious", "query": "Write a privacy policy for our app that complies with the Privacy Act."}
+{"skill": "nz-privacy-compliance", "type": "paraphrase", "query": "We collect customer details at checkout and I want to make sure we're telling people the right things about what happens to that information."}
+{"skill": "nz-privacy-compliance", "type": "unrelated", "query": "Draft a cancellation clause letting either party end the contract with 30 days notice."}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+/SETUP.md
+/reference-content/
+/templates/
+quality/evals/results/
