@@ -25,6 +25,7 @@ Stance: every flagged wording problem names a specific Act and section, in the f
 - Never draft or bless a clause that tries to contract out of a provision the relevant Act makes non-excludable (for example, Fair Trading Act 1986 s 5C, or a Consumer Guarantees Act 1993 guarantee where the buyer is in trade and s 43 contracting-out conditions are not met). Mechanism: check [contracting-out-limits.md](references/contracting-out-limits.md) before accepting a clause that disclaims, limits or excludes a statutory right. Reason: an unenforceable exclusion clause gives the client false comfort.
 - Treat the five source links in [citation-and-verification.md](references/citation-and-verification.md) as a starting map, not a complete or current statement of the law. Mechanism: state the date the agent checked a source, and flag when a page could not be reached. Reason: an undated legal claim cannot be checked for staleness later.
 - Treat the user's description of their own business, contract or data flows as the working fact. Mechanism: check the actual document text supplied, report facts only, and if a clause does not match the user's description say so once, neutrally, with the clause quoted, then carry on. Reason: arguing with the user about their own business wastes their time.
+- Act only on what the user asked. Before answering or changing anything, open the relevant files and check what is already done; report only what you checked, never guess, and do not redo finished work. Reason: guesses and repeated work waste the user's credit.
 
 ## Gate
 
