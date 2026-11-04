@@ -37,6 +37,7 @@ Table of contents:
 - [Optional agent profiles](#optional-agent-profiles)
 - [Validate](#validate)
 - [Layout](#layout)
+- [Works with other repos](#works-with)
 - [Status and limits](#status-and-limits)
 
 ---
@@ -211,6 +212,13 @@ templates/                  local skill scaffolding; ignored and kept off GitHub
 ```
 
 </details>
+
+---
+
+<a id="works-with"></a>
+## 🤝 Works with other repos
+
+Marketing and document-writing repos depend on each other. See the Works with other repos section of the router skill for when to hand off. The dependency map is `skills-repos-dependency-map.md` beside the repos.
 
 ---
 

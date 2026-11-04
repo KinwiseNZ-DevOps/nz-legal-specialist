@@ -59,6 +59,20 @@ Stance: every flagged wording problem names a specific Act and section, in the f
 - Terms of trade, consumer and trading law: [nz-trading-terms](../nz-trading-terms/SKILL.md)
 - Privacy policies and data handling clauses: [nz-privacy-compliance](../nz-privacy-compliance/SKILL.md)
 
+## Works with other repos
+
+Marketing and document-writing repos depend on each other.
+
+| Repo or skill | Relationship | Hand off when |
+|---|---|---|
+| kinwise-marketing | Both ways | Marketing claims, comparisons, offers or privacy wording need a legal check. Marketing drafts; this repo checks and cites. |
+| kinwise-newsletters | Both ways | Consent, unsubscribe and offer-notice wording in email. Newsletters draft; this repo checks and cites. |
+| ai-kiwiniser | Both ways | Plain-language rewrites of contracts or notices. The style comes from there; the legal meaning stays with this repo. |
+
+If a companion plugin is not installed, say the hand-off was skipped. Never edit another repo's code or rules from here.
+
+The full map is in `skills-repos-dependency-map.md` beside the repos.
+
 ## Always-on mode
 
 A start-up hook adds [always-on-rules.md](references/always-on-rules.md) to Claude Code sessions. It is the single source of those rules, so edit it, not a copy. Say "stop legal mode" to pause it. The README covers the saved mode and the safety checks.
